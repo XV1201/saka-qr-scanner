@@ -157,20 +157,25 @@
 
     
 
+
 function isAllowedAdminOrigin(origin) {
   try {
     const url = new URL(origin);
     const host = url.hostname.toLowerCase();
 
-    return url.protocol === 'https:' && (
+    if (url.protocol !== 'https:') return false;
+
+    return (
       host === 'script.google.com' ||
       host === 'script.googleusercontent.com' ||
-      host.endsWith('.script.googleusercontent.com')
+      /^[a-z0-9-]+-script\.googleusercontent\.com$/.test(host) ||
+      /^[a-z0-9-]+\.script\.googleusercontent\.com$/.test(host)
     );
   } catch (err) {
     return false;
   }
 }
+
 
 
 
