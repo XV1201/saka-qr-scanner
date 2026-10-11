@@ -80,8 +80,15 @@
       }
     }
 
-    window.addEventListener('message', async event => {
-      if (!window.opener || event.source !== window.opener) return;
+window.addEventListener('message', async event => {
+  console.log('[SCANNER] Pesan diterima:', {
+    origin: event.origin,
+    type: event.data?.type,
+    hasOpener: !!window.opener,
+    fromOpener: event.source === window.opener
+  });
+
+  if (!window.opener || event.source !== window.opener) return;
 
       if (event.data &&
           event.data.type === 'SAKA_SCANNER_INIT') {
