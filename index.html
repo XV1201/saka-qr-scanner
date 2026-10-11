@@ -156,15 +156,13 @@
     const SCANNER_ORIGIN = location.origin;
 
     
+
 function isAllowedAdminOrigin(origin) {
   try {
     const url = new URL(origin);
-
-    if (url.protocol !== 'https:') return false;
-
     const host = url.hostname.toLowerCase();
 
-    return (
+    return url.protocol === 'https:' && (
       host === 'script.google.com' ||
       host === 'script.googleusercontent.com' ||
       host.endsWith('.script.googleusercontent.com')
@@ -173,6 +171,7 @@ function isAllowedAdminOrigin(origin) {
     return false;
   }
 }
+
 
 
     const $ = id => document.getElementById(id);
