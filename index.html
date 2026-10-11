@@ -4,14 +4,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pemindai QR Saka Bhayangkara</title>
+  <title>Pemindai QR — Saka Bhayangkara</title>
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
   <style>
     body {
-      font-family: Arial, sans-serif;
       max-width: 560px;
-      margin: 24px auto;
+      margin: 20px auto;
       padding: 16px;
+      font-family: Arial, sans-serif;
       color: #17202b;
     }
     button {
@@ -22,98 +22,214 @@
       background: #17365d;
       color: white;
       font-weight: bold;
+      cursor: pointer;
     }
+    button:disabled { opacity: .5; }
     #reader { width: 100%; margin-top: 16px; }
     #status {
       padding: 12px;
-      background: #f1f4f8;
       border-radius: 8px;
-      white-space: pre-wrap;
+      background: #f1f4f8;
+      line-height: 1.5;
       overflow-wrap: anywhere;
+      white-space: pre-wrap;
     }
   </style>
 </head>
 <body>
   <h2>Pemindai QR Saka Bhayangkara</h2>
-  <p>Halaman ini harus dibuka dari tombol pemindai pada aplikasi admin.</p>
-  <button id="start">Mulai kamera</button>
-  <button id="stop">Hentikan kamera</button>
+  <p>Gunakan halaman ini melalui tombol pemindai di aplikasi admin.</p>
+
+  <button id="start">Mulai Kamera</button>
+  <button id="next" disabled>Scan Berikutnya</button>
+  <button id="stop" disabled>Hentikan Kamera</button>
+
   <div id="reader"></div>
-  <p id="status">Menunggu kamera diaktifkan.</p>
+  <p id="status">Menghubungkan ke aplikasi admin…</p>
 
   <script>
-    // GANTI dengan origin aplikasi admin yang benar.
-    const ADMIN_ORIGIN = "https://script.google.com";
+    'use strict';
 
+    const ADMIN_ORIGIN_ALLOWED = origin =>
+      origin === 'https://script.google.com' ||
+      origin.endsWith('.script.googleusercontent.com');
+
+    let adminOrigin = null;
     let scanner = null;
     let running = false;
-    let sending = false;
+    let waitingForResult = false;
+    let scanCounter = 0;
+    let currentScanId = null;
 
-    const statusEl = document.getElementById("status");
+    const statusEl = document.getElementById('status');
+    const startBtn = document.getElementById('start');
+    const nextBtn = document.getElementById('next');
+    const stopBtn = document.getElementById('stop');
 
-    function status(message) {
-      statusEl.textContent = message;
+    function setStatus(text) {
+      statusEl.textContent = text;
     }
 
-    document.getElementById("start").onclick = async () => {
-      if (!window.opener || window.opener.closed) {
-        status("Buka pemindai melalui tombol di aplikasi admin.");
-        return;
+    function sendReady() {
+      if (window.opener && !window.opener.closed) {
+        // Pesan ini hanya meminta inisialisasi; tidak membawa rahasia.
+        window.opener.postMessage(
+          { type: 'SAKA_SCANNER_READY' },
+          '*'
+        );
       }
-      if (running) return;
+    }
 
-      if (typeof Html5Qrcode === "undefined") {
-        status("Library QR gagal dimuat. Periksa koneksi internet.");
+    window.addEventListener('message', async event => {
+      if (!window.opener || event.source !== window.opener) return;
+
+      if (event.data &&
+          event.data.type === 'SAKA_SCANNER_INIT') {
+        if (!ADMIN_ORIGIN_ALLOWED(event.origin)) {
+          setStatus('Origin aplikasi admin tidak dikenali. Tutup halaman ini dan buka kembali dari aplikasi admin.');
+          return;
+        }
+
+        adminOrigin = event.origin;
+        setStatus('Terhubung ke aplikasi admin. Kamu dapat mengaktifkan kamera.');
+        startBtn.disabled = false;
         return;
       }
+
+      // Semua pesan berikut harus datang dari origin admin yang
+      // sudah diverifikasi saat proses inisialisasi.
+      if (!adminOrigin || event.origin !== adminOrigin) return;
+
+      if (event.data &&
+          event.data.type === 'SAKA_SCAN_RESULT' &&
+          event.data.scanId === currentScanId) {
+        waitingForResult = false;
+        currentScanId = null;
+
+        const result = event.data.result || {};
+        setStatus(result.message || 'Pemindaian selesai.');
+
+        if (running && scanner) {
+          nextBtn.disabled = false;
+          nextBtn.textContent = 'Scan Berikutnya';
+        }
+      }
+
+      if (event.data &&
+          event.data.type === 'SAKA_SCANNER_STOP') {
+        await stopCamera();
+      }
+    });
+
+    async function startCamera() {
+      if (!adminOrigin) {
+        setStatus('Belum terhubung ke aplikasi admin. Buka halaman ini dari tombol pemindai admin.');
+        return;
+      }
+
+      if (running) {
+        if (scanner && !waitingForResult) {
+          try {
+            await scanner.resume();
+            setStatus('Kamera aktif. Arahkan ke QR anggota berikutnya.');
+          } catch (err) {
+            setStatus('Tidak dapat melanjutkan kamera: ' + String(err));
+          }
+        }
+        return;
+      }
+
+      if (typeof Html5Qrcode === 'undefined') {
+        setStatus('Library QR gagal dimuat. Periksa koneksi internet.');
+        return;
+      }
+
+      startBtn.disabled = true;
 
       try {
-        scanner = new Html5Qrcode("reader");
+        scanner = new Html5Qrcode('reader');
+
         await scanner.start(
-          { facingMode: "environment" },
-          { fps: 10, qrbox: { width: 230, height: 230 } },
-          async (decodedText) => {
-            if (sending) return;
-            sending = true;
+          { facingMode: 'environment' },
+          {
+            fps: 10,
+            qrbox: { width: 230, height: 230 },
+            aspectRatio: 1
+          },
+          decodedText => {
+            if (waitingForResult || !adminOrigin) return;
 
-            try {
-              // QR hanya diteruskan ke jendela admin pembuka.
-              window.opener.postMessage({
-                type: "SAKA_QR_SCAN",
-                text: decodedText
-              }, ADMIN_ORIGIN);
+            waitingForResult = true;
+            currentScanId = 'scan-' + (++scanCounter);
 
-              status("QR terbaca dan diteruskan ke aplikasi admin.");
-              await scanner.pause(true);
-              document.getElementById("start").textContent = "Scan berikutnya";
-            } catch (err) {
-              status("Gagal meneruskan QR: " + String(err));
-            }
+            // Hentikan pembacaan berulang selama server memproses QR.
+            scanner.pause(true);
+            nextBtn.disabled = true;
+
+            window.opener.postMessage({
+              type: 'SAKA_QR_SCAN',
+              scanId: currentScanId,
+              text: decodedText
+            }, adminOrigin);
+
+            setStatus('QR dikirim ke admin. Menunggu hasil validasi server…');
           }
         );
 
         running = true;
-        status("Kamera aktif. Arahkan kamera ke QR anggota.");
+        stopBtn.disabled = false;
+        nextBtn.disabled = true;
+        setStatus('Kamera aktif. Arahkan ke QR anggota.');
       } catch (err) {
-        status("Kamera gagal dibuka: " + String(err));
+        scanner = null;
+        running = false;
+        startBtn.disabled = false;
+        setStatus(
+          'Kamera gagal dibuka: ' + String(err) +
+          '\nPeriksa izin kamera browser dan pastikan halaman menggunakan HTTPS.'
+        );
       }
-    };
+    }
 
-    document.getElementById("stop").onclick = async () => {
+    async function nextScan() {
+      if (!running || !scanner || waitingForResult) return;
+
+      try {
+        await scanner.resume();
+        nextBtn.disabled = true;
+        setStatus('Siap memindai QR berikutnya.');
+      } catch (err) {
+        setStatus('Gagal melanjutkan kamera: ' + String(err));
+      }
+    }
+
+    async function stopCamera() {
       if (scanner && running) {
         try {
           await scanner.stop();
           scanner.clear();
         } catch (err) {
-          status("Kamera dihentikan atau sudah tidak aktif.");
+          // Tetap reset status lokal jika kamera sudah berhenti.
         }
       }
+
       scanner = null;
       running = false;
-      sending = false;
-      document.getElementById("start").textContent = "Mulai kamera";
-      status("Kamera dihentikan.");
-    };
+      waitingForResult = false;
+      currentScanId = null;
+
+      startBtn.disabled = false;
+      nextBtn.disabled = true;
+      stopBtn.disabled = true;
+      setStatus('Kamera dihentikan.');
+    }
+
+    startBtn.addEventListener('click', startCamera);
+    nextBtn.addEventListener('click', nextScan);
+    stopBtn.addEventListener('click', stopCamera);
+
+    startBtn.disabled = true;
+    sendReady();
   </script>
 </body>
 </html>
