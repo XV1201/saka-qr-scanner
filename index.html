@@ -155,13 +155,25 @@
      */
     const SCANNER_ORIGIN = location.origin;
 
-    function isAllowedAdminOrigin(origin) {
-      if (origin === 'https://script.google.com') return true;
-      if (origin === 'https://script.googleusercontent.com') return true;
+    
+function isAllowedAdminOrigin(origin) {
+  try {
+    const url = new URL(origin);
 
-      return /^https:\/\/[a-z0-9-]+\.script\.googleusercontent\.com$/i
-        .test(origin);
-    }
+    if (url.protocol !== 'https:') return false;
+
+    const host = url.hostname.toLowerCase();
+
+    return (
+      host === 'script.google.com' ||
+      host === 'script.googleusercontent.com' ||
+      host.endsWith('.script.googleusercontent.com')
+    );
+  } catch (err) {
+    return false;
+  }
+}
+
 
     const $ = id => document.getElementById(id);
 
