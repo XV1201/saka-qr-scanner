@@ -1,9 +1,521 @@
-window.addEventListener('message', async event => {
-  console.log('[SCANNER] Pesan diterima:', {
-    origin: event.origin,
-    type: event.data?.type,
-    hasOpener: !!window.opener,
-    fromOpener: event.source === window.opener
-  });
 
-  if (!window.opener || event.source !== window.opener) return;
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17365d">
+  <title>Pemindai QR — Saka Bhayangkara</title>
+
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+
+  <style>
+    :root {
+      --navy: #17365d;
+      --bg: #f3f5f8;
+      --border: #d8dee8;
+      --green: #166534;
+      --red: #991b1b;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      max-width: 560px;
+      margin: 0 auto;
+      padding: 18px;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: #17202b;
+    }
+
+    h2 { margin-top: 0; }
+
+    .card {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+      margin-bottom: 14px;
+    }
+
+    .muted {
+      color: #5e6878;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .buttons {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 12px 15px;
+      border: 0;
+      border-radius: 9px;
+      background: var(--navy);
+      color: white;
+      font-weight: bold;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: .45;
+      cursor: not-allowed;
+    }
+
+    #next { background: #315c8c; }
+    #stop { background: #8b3030; }
+
+    #status {
+      padding: 13px;
+      border-radius: 9px;
+      background: #f1f4f8;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    #status.success {
+      background: #eaf7ef;
+      color: var(--green);
+    }
+
+    #status.error {
+      background: #fff0ef;
+      color: var(--red);
+    }
+
+    #status.warn {
+      background: #fff7e6;
+      color: #754600;
+    }
+
+    #reader {
+      width: 100%;
+      margin-top: 16px;
+      overflow: hidden;
+      border-radius: 10px;
+    }
+
+    .small {
+      font-size: 12px;
+      color: #64748b;
+      overflow-wrap: anywhere;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <h2>Pemindai QR Saka Bhayangkara</h2>
+
+    <p class="muted">
+      Buka halaman ini melalui tombol Buka Pemindai
+      di aplikasi admin absensi.
+    </p>
+
+    <div id="status" role="status" aria-live="polite">
+      Menghubungkan ke aplikasi admin…
+    </div>
+
+    <p class="small" id="connectionInfo">
+      Status koneksi: menunggu aplikasi admin.
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="buttons">
+      <button id="start" type="button" disabled>
+        Mulai Kamera
+      </button>
+
+      <button id="next" type="button" disabled>
+        Scan Berikutnya
+      </button>
+
+      <button id="stop" type="button" disabled>
+        Hentikan Kamera
+      </button>
+    </div>
+
+    <div id="reader"></div>
+  </div>
+
+  <script>
+    'use strict';
+
+    /*
+     * Origin aplikasi admin yang diizinkan.
+     * Tidak menggunakan wildcard untuk pesan yang membawa data QR.
+     */
+    const SCANNER_ORIGIN = location.origin;
+
+    function isAllowedAdminOrigin(origin) {
+      if (origin === 'https://script.google.com') return true;
+      if (origin === 'https://script.googleusercontent.com') return true;
+
+      return /^https:\/\/[a-z0-9-]+\.script\.googleusercontent\.com$/i
+        .test(origin);
+    }
+
+    const $ = id => document.getElementById(id);
+
+    const startBtn = $('start');
+    const nextBtn = $('next');
+    const stopBtn = $('stop');
+    const statusEl = $('status');
+    const connectionInfo = $('connectionInfo');
+
+    let adminOrigin = null;
+    let scanner = null;
+    let running = false;
+    let starting = false;
+    let waitingForResult = false;
+    let scanCounter = 0;
+    let currentScanId = null;
+    let readyTimer = null;
+    let lastDecoded = '';
+    let lastDecodedAt = 0;
+
+    function setStatus(message, kind = '') {
+      statusEl.textContent = message;
+      statusEl.className = kind;
+    }
+
+    function setConnection(message) {
+      connectionInfo.textContent = 'Status koneksi: ' + message;
+    }
+
+    function setDisconnected() {
+      adminOrigin = null;
+      startBtn.disabled = true;
+      nextBtn.disabled = true;
+      stopBtn.disabled = true;
+      setConnection('belum terhubung');
+      setStatus(
+        'Belum terhubung ke aplikasi admin. ' +
+        'Buka pemindai dari tombol di aplikasi admin.'
+      );
+    }
+
+    /*
+     * READY tidak membawa token atau data anggota.
+     * Pesan ini dikirim berulang karena jendela pemindai mungkin
+     * selesai dimuat sebelum listener aplikasi admin siap.
+     */
+    function sendReady() {
+      if (!window.opener || window.opener.closed) {
+        setStatus(
+          'Jendela aplikasi admin tidak ditemukan. ' +
+          'Tutup halaman ini dan buka kembali dari aplikasi admin.',
+          'error'
+        );
+        setConnection('jendela admin tidak ditemukan');
+        return;
+      }
+
+      window.opener.postMessage(
+        { type: 'SAKA_SCANNER_READY' },
+        '*'
+      );
+    }
+
+    function startReadyRetry() {
+      sendReady();
+
+      if (readyTimer) clearInterval(readyTimer);
+
+      readyTimer = setInterval(() => {
+        if (adminOrigin) {
+          clearInterval(readyTimer);
+          readyTimer = null;
+          return;
+        }
+
+        sendReady();
+      }, 1000);
+    }
+
+    function sendToAdmin(message) {
+      if (!adminOrigin || !window.opener || window.opener.closed) {
+        setDisconnected();
+        return false;
+      }
+
+      window.opener.postMessage(message, adminOrigin);
+      return true;
+    }
+
+    /*
+     * Terima pesan hanya dari jendela yang membuka pemindai.
+     */
+    window.addEventListener('message', async event => {
+      if (!window.opener || event.source !== window.opener) return;
+
+      const data = event.data;
+      if (!data || typeof data !== 'object') return;
+
+      if (data.type === 'SAKA_SCANNER_INIT') {
+        if (!isAllowedAdminOrigin(event.origin)) {
+          setStatus(
+            'Origin aplikasi admin tidak dikenali: ' + event.origin +
+            '\nBuka kembali pemindai dari aplikasi admin yang resmi.',
+            'error'
+          );
+          setConnection('origin ditolak');
+          return;
+        }
+
+        adminOrigin = event.origin;
+
+        if (readyTimer) {
+          clearInterval(readyTimer);
+          readyTimer = null;
+        }
+
+        startBtn.disabled = running || starting;
+        nextBtn.disabled = !running || !waitingForResult;
+        stopBtn.disabled = !running;
+
+        setConnection('terhubung ke ' + adminOrigin);
+        setStatus(
+          'Terhubung ke aplikasi admin. ' +
+          'Tekan Mulai Kamera untuk memindai QR anggota.',
+          'success'
+        );
+        return;
+      }
+
+      // Pesan lain wajib berasal dari origin admin yang terverifikasi.
+      if (!adminOrigin || event.origin !== adminOrigin) return;
+
+      if (data.type === 'SAKA_SCAN_RESULT') {
+        if (data.scanId !== currentScanId) return;
+
+        waitingForResult = false;
+        currentScanId = null;
+
+        const result = data.result || {};
+        const ok = result.ok === true;
+
+        setStatus(
+          result.message || 'Pemrosesan absensi selesai.',
+          ok ? 'success' : 'warn'
+        );
+
+        if (running && scanner) {
+          nextBtn.disabled = false;
+          nextBtn.textContent = 'Scan Berikutnya';
+        }
+        return;
+      }
+
+      if (data.type === 'SAKA_SCANNER_STOP') {
+        await stopCamera(false);
+      }
+    });
+
+    async function startCamera() {
+      if (!adminOrigin) {
+        setStatus(
+          'Belum terhubung ke admin. Tutup jendela ini, ' +
+          'lalu buka kembali dari tombol Buka Pemindai.',
+          'error'
+        );
+        return;
+      }
+
+      if (running || starting) return;
+
+      if (typeof Html5Qrcode === 'undefined') {
+        setStatus(
+          'Library pemindai QR gagal dimuat. ' +
+          'Periksa koneksi internet atau pemblokir konten browser.',
+          'error'
+        );
+        return;
+      }
+
+      starting = true;
+      startBtn.disabled = true;
+      nextBtn.disabled = true;
+      stopBtn.disabled = true;
+
+      setStatus(
+        'Meminta izin kamera… Jika diminta browser, pilih Izinkan.'
+      );
+
+      try {
+        scanner = new Html5Qrcode('reader');
+
+        await scanner.start(
+          { facingMode: 'environment' },
+          {
+            fps: 10,
+            qrbox: { width: 230, height: 230 },
+            aspectRatio: 1
+          },
+          onQrDecoded,
+          () => {
+            // Kesalahan pembacaan per frame adalah hal normal.
+          }
+        );
+
+        running = true;
+        starting = false;
+
+        startBtn.disabled = true;
+        nextBtn.disabled = true;
+        stopBtn.disabled = false;
+
+        setStatus(
+          'Kamera aktif. Arahkan QR anggota ke dalam kotak pemindai.',
+          'success'
+        );
+      } catch (err) {
+        starting = false;
+        running = false;
+
+        const message = err && err.message
+          ? err.message
+          : String(err);
+
+        try {
+          if (scanner) await scanner.clear();
+        } catch (_) {}
+
+        scanner = null;
+
+        startBtn.disabled = !adminOrigin;
+        nextBtn.disabled = true;
+        stopBtn.disabled = true;
+
+        setStatus(
+          'Kamera gagal dibuka.\n' + message +
+          '\n\nPeriksa izin kamera browser, pastikan halaman HTTPS, ' +
+          'dan tutup aplikasi lain yang sedang memakai kamera.',
+          'error'
+        );
+      }
+    }
+
+    function onQrDecoded(decodedText) {
+      if (!adminOrigin || !running || waitingForResult) return;
+
+      const now = Date.now();
+
+      // Mencegah QR yang sama terkirim berkali-kali dalam waktu singkat.
+      if (decodedText === lastDecoded && now - lastDecodedAt < 2500) {
+        return;
+      }
+
+      lastDecoded = decodedText;
+      lastDecodedAt = now;
+
+      waitingForResult = true;
+      currentScanId = 'scan-' + Date.now() + '-' + (++scanCounter);
+
+      nextBtn.disabled = true;
+
+      try {
+        scanner.pause(true);
+      } catch (_) {}
+
+      const sent = sendToAdmin({
+        type: 'SAKA_QR_SCAN',
+        scanId: currentScanId,
+        text: decodedText
+      });
+
+      if (!sent) {
+        waitingForResult = false;
+        currentScanId = null;
+        nextBtn.disabled = false;
+        return;
+      }
+
+      setStatus(
+        'QR berhasil dibaca dan dikirim ke admin. ' +
+        'Menunggu validasi server…'
+      );
+    }
+
+    async function nextScan() {
+      if (!running || !scanner || waitingForResult) return;
+
+      try {
+        await scanner.resume();
+        nextBtn.disabled = true;
+
+        setStatus(
+          'Siap memindai QR berikutnya. Arahkan kamera ke QR anggota.'
+        );
+      } catch (err) {
+        setStatus(
+          'Gagal melanjutkan pemindaian: ' + String(err),
+          'error'
+        );
+      }
+    }
+
+    async function stopCamera(notifyAdmin = true) {
+      if (starting) {
+        setStatus('Kamera sedang dipersiapkan. Tunggu sebentar.');
+        return;
+      }
+
+      if (scanner && running) {
+        try {
+          await scanner.stop();
+        } catch (err) {
+          console.warn('Penghentian kamera:', err);
+        }
+
+        try {
+          await scanner.clear();
+        } catch (err) {
+          console.warn('Pembersihan pemindai:', err);
+        }
+      }
+
+      scanner = null;
+      running = false;
+      starting = false;
+      waitingForResult = false;
+      currentScanId = null;
+
+      startBtn.disabled = !adminOrigin;
+      nextBtn.disabled = true;
+      stopBtn.disabled = true;
+
+      setStatus(
+        'Kamera dihentikan. Tekan Mulai Kamera untuk memulai kembali.'
+      );
+
+      if (notifyAdmin && adminOrigin) {
+        setConnection('terhubung ke ' + adminOrigin);
+      }
+    }
+
+    startBtn.addEventListener('click', startCamera);
+    nextBtn.addEventListener('click', nextScan);
+    stopBtn.addEventListener('click', () => stopCamera(true));
+
+    window.addEventListener('beforeunload', () => {
+      if (readyTimer) clearInterval(readyTimer);
+    });
+
+    // Keadaan awal: semua tombol terkunci sampai admin terverifikasi.
+    startBtn.disabled = true;
+    nextBtn.disabled = true;
+    stopBtn.disabled = true;
+
+    startReadyRetry();
+  </script>
+</body>
+</html>
